@@ -1,0 +1,36 @@
+#!/bin/sh
+# dsh-web-url — 打印当前 Web host 的带 token 地址（打开一次即可换 30 天 cookie）。
+#
+# token 每个进程随机生成，存在日志里；host 重启后旧地址失效，重跑本命令即可。
+set -u
+
+LOG="${DSH_WEB_LOG:-$HOME/Library/Logs/dsh-web.log}"
+LABEL="com.deepseek.dsh-web"
+
+if [ ! -f "$LOG" ]; then
+	echo "没有日志：$LOG（服务没启动过？）" >&2
+	exit 1
+fi
+
+url=$(/usr/bin/grep -o 'dsh web: http[^[:space:]]*' "$LOG" 2>/dev/null | /usr/bin/tail -n 1 | /usr/bin/sed 's/^dsh web: //')
+
+if [ -z "$url" ]; then
+	echo "日志里还没有 URL：$LOG" >&2
+	echo "看下最近的日志：tail -n 40 \"$LOG\"" >&2
+	exit 1
+fi
+
+state=$(/bin/launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | /usr/bin/awk '/^[[:space:]]*state = /{print $3; exit}')
+[ -n "$state" ] || state="未加载"
+
+# 带 token 的首页会 303 换 cookie；401 说明 token 属于上一个进程（已重启）。
+code=$(/usr/bin/curl -s -o /dev/null -m 3 -w '%{http_code}' "$url" 2>/dev/null)
+
+printf '%s\n' "$url"
+printf '状态：launchd=%s  HTTP=%s' "$state" "${code:-无响应}"
+case "${code:-}" in
+	303) printf ' （正常：打开一次换 30 天 cookie）\n' ;;
+	401) printf ' （token 已失效：服务重启过，重跑本命令）\n' ;;
+	000|'') printf ' （连不上：服务没起，看 tail -n 40 %s）\n' "$LOG" ;;
+	*) printf '\n' ;;
+esac

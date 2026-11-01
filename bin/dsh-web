@@ -1,0 +1,98 @@
+#!/bin/sh
+# dsh-web — 把 DeepSeek Harness 的 Web host 绑到本机 Tailscale IPv4 上，供手机访问。
+#
+# 行为：
+#   1. 有别的 host（通常是桌面 App）正占着会话写锁时，最多等 10 分钟让它退出；
+#   2. 解析本机 Tailscale IPv4（等接口就绪，最多 60 秒）；
+#   3. exec 掉 App 自带的同版本 CLI：dsh web --host <ts-ip> --port <port> --no-open
+#
+# 用法：
+#   dsh-web            正常启动（launchd 也是走这条）
+#   dsh-web --dry-run  只做检查并打印将要绑定的地址，不启动
+#
+# 环境变量：
+#   DSH_WEB_PORT          监听端口，默认 8443
+#   DSH_WEB_WAIT_SECONDS  等会话锁释放的秒数，默认 600
+#   DSH_WEB_LOG           日志路径，默认 ~/Library/Logs/dsh-web.log
+set -u
+
+DSH_BIN="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+PORT="${DSH_WEB_PORT:-8443}"
+WAIT_LOCK_SECONDS="${DSH_WEB_WAIT_SECONDS:-600}"
+LOG="${DSH_WEB_LOG:-$HOME/Library/Logs/dsh-web.log}"
+LABEL="com.deepseek.dsh-web"
+
+log() { printf '%s [dsh-web] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+
+dry_run=0
+if [ "${1:-}" = "--dry-run" ]; then
+	dry_run=1
+elif [ $# -gt 0 ]; then
+	log "未知参数：$1（只支持 --dry-run）"
+	exit 2
+fi
+
+if [ ! -x "$DSH_BIN" ]; then
+	log "找不到 CLI：$DSH_BIN（App 被移动或删除？）"
+	exit 1
+fi
+
+# 本机 Tailscale IPv4；优先用 PATH 里的 shim，其次直接调 App 内二进制。
+tailscale_ip() {
+	ts=/usr/local/bin/tailscale
+	[ -x "$ts" ] || ts="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+	[ -x "$ts" ] || return 1
+	"$ts" ip -4 2>/dev/null | head -n 1
+}
+
+# 正在被打开着的 session.lock，就是另一个 host 的写锁。
+lock_holders() {
+	set -- "${DSH_HOME:-$HOME/.dsh}"/sessions/*/*/session.lock
+	[ -e "$1" ] || return 0
+	/usr/sbin/lsof -t "$@" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+holders=$(lock_holders)
+if [ -n "$holders" ]; then
+	if [ "$dry_run" = 1 ]; then
+		log "dry-run：会话被 PID $holders 占着（另一个 host，通常是桌面 App）"
+	else
+		log "会话被 PID $holders 占着（通常是桌面 App），等它退出，最多 ${WAIT_LOCK_SECONDS}s"
+		deadline=$(( $(date +%s) + WAIT_LOCK_SECONDS ))
+		while [ -n "$holders" ]; do
+			if [ "$(date +%s)" -ge "$deadline" ]; then
+				log "等待超时，先不启动。退出 App 后执行：launchctl kickstart -k gui/$(id -u)/$LABEL"
+				exit 0
+			fi
+			sleep 5
+			holders=$(lock_holders)
+		done
+		log "会话锁已释放"
+	fi
+fi
+
+ip=$(tailscale_ip)
+if [ -z "$ip" ]; then
+	if [ "$dry_run" = 1 ]; then
+		log "dry-run：Tailscale 没有 IPv4（未登录或接口未起）"
+		exit 1
+	fi
+	i=0
+	while [ "$i" -lt 30 ] && [ -z "$ip" ]; do
+		sleep 2
+		i=$((i + 1))
+		ip=$(tailscale_ip)
+	done
+	if [ -z "$ip" ]; then
+		log "Tailscale 没有 IPv4，稍后重试（检查 tailscale status）"
+		exit 1
+	fi
+fi
+
+if [ "$dry_run" = 1 ]; then
+	log "dry-run：检查通过，将绑定 http://$ip:$PORT 并执行 dsh web"
+	exit 0
+fi
+
+log "启动：http://$ip:$PORT （日志 $LOG）"
+exec "$DSH_BIN" web --host "$ip" --port "$PORT" --no-open

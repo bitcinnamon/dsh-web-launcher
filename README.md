@@ -1,6 +1,7 @@
 # dsh-web launcher
 
-把 DeepSeek Harness 的 **Web host** 绑到本机 Tailscale IPv4 上，手机 / 本机浏览器共用一个会话库。
+把 DeepSeek Harness 的 **Web host** 用 launchd 常驻，手机 / 本机浏览器共用一个会话库。
+两种接法：直接绑 Tailscale IP（HTTP），或 `127.0.0.1` + `tailscale serve`（HTTPS，推荐）。
 用 App 自带的 CLI（当前 `0.2.1-rc.5`，和桌面端同版本），不需要装 Node。
 
 ```
@@ -74,8 +75,8 @@ dsh-mode restart
 ## 它做了什么
 
 1. **等锁**：`~/.dsh/sessions/*/*/session.lock` 被别的进程打开着（桌面 App 常驻时会这样），就每 5 秒看一次，最多等 10 分钟（`DSH_WEB_WAIT_SECONDS`）。
-2. **解析 IP**：`tailscale ip -4`，接口没起来就等 60 秒。
-3. **启动**：`dsh web --host <ts-ip> --port 8443 --no-open`。
+2. **解析绑定地址**：`DSH_WEB_HOST` 优先；没设就 `tailscale ip -4`（接口没起来等 60 秒）。
+3. **启动**：`dsh web --host <addr> --port 8443 --no-open`，`DSH_WEB_PUBLIC_URL` / `DSH_WEB_TRUSTED_HOST` 会透传成 `--public-url` / `--trusted-host`。
 
 日志在 `~/Library/Logs/dsh-web.log`（umask 077，含 token）。
 
@@ -89,43 +90,48 @@ dsh-mode restart
 
 ## 两种接入方式
 
-### A. 直接绑 Tailscale IP（默认）
+### A. 直接绑 Tailscale IP（HTTP）
 
 `dsh-web` 启动时解析 `tailscale ip -4` 并 `--host <ts-ip>`。tailscaled 把 IP 挂在 utun 上，内核直接投递到 socket。
 
 - 手机 / 本机：`http://<tailscale-ip>:8443/`
 - 优点：没有额外一跳，最简单
-- 缺点：明文 HTTP（WireGuard 已加密链路），手机侧剪贴板 API / PWA 安装需要 secure context，会不可用
+- 缺点：明文 HTTP；手机侧剪贴板 API / PWA 安装需要 secure context，用不了
 
-本机浏览器如果被系统代理（`127.0.0.1:3128`）拦成 502，把 `100.64.0.0/10` 加进代理排除列表即可——不需要额外的本地监听。
+本机浏览器如果被系统代理（`127.0.0.1:3128`）拦成 502，把 `100.64.0.0/10` 加进代理排除列表即可。
 
-### B. 127.0.0.1 + `tailscale serve`（反向代理，HTTPS）
+### B. 127.0.0.1 + `tailscale serve`（HTTPS，推荐）
+
+tailscaled 在 tailnet 的 443 上终止 TLS 并反代到本地 loopback，dsh 不用自己管证书。
+
+**前置**（Tailscale 管理台 → DNS）：
+
+- 打开 **MagicDNS**
+- 打开 **HTTPS Certificates**（`tailscale cert` 报 “account does not support getting TLS certs” 就是这里没开）
+
+**配置**：
 
 ```sh
-# 1) 让 dsh 只绑 loopback（或在 plist 的 EnvironmentVariables 里加 DSH_WEB_HOST=127.0.0.1）
-DSH_WEB_HOST=127.0.0.1 dsh-mode restart
-
-# 2) tailscaled 在 tailnet 的 443 上反代到本地
+# 1) serve：tailnet 443 -> 本地 loopback
 tailscale serve --bg --https=443 http://127.0.0.1:8443
 
-# 3) 手机开
-#    https://<machine>.<tailnet>.ts.net/
+# 2) 让 dsh 只绑 loopback，并把对外地址告诉它（写进 plist 的 EnvironmentVariables）
+#    DSH_WEB_HOST=127.0.0.1
+#    DSH_WEB_PUBLIC_URL=https://<machine>.<tailnet>.ts.net
+#    DSH_WEB_TRUSTED_HOST=<machine>.<tailnet>.ts.net
+
+# 3) 重载生效
+dsh-mode restart
 ```
 
-要点：
+`dsh-mode restart` 走的是 bootout + bootstrap，会重新读 plist；`launchctl kickstart` **不会**，改了 plist 必须用前者。
 
-- cookie 按 Host（authority）签发，`serve` 必须**原样透传 Host**；一旦被改写成 `127.0.0.1:8443`，浏览器拿不到 cookie，就是 401 循环
-- 要把对外地址告诉 dsh，否则打印和 `DSH_WEB_URL` 里还是 loopback：
+**踩过的坑**：
 
-  ```sh
-  DSH_WEB_PUBLIC_URL=https://<machine>.<tailnet>.ts.net \
-  DSH_WEB_TRUSTED_HOST=<machine>.<tailnet>.ts.net \
-  DSH_WEB_HOST=127.0.0.1 dsh-mode restart
-  ```
-
-  这两个变量由 `dsh-web` 透传给 `dsh web --public-url/--trusted-host`
-- 需要先在 Tailscale 管理台打开 HTTPS Certificates（MagicDNS 也要开），`serve` 才能签证书
-- 这条路的入站由 tailscaled 接：换成 sing-box 这类**用户态** Tailscale 端点就没有 `serve` 能力，模式 B 走不通
+- `serve` 的上游**必须是 127.0.0.1**。指到 `100.x` 会挂住：TLS 握手能完成，但请求永远等不到响应（tailscaled 自己 hairpin 自己的 tailnet IP）
+- `serve` 会**原样透传 Host**（实测 `Host: <machine>.<tailnet>.ts.net`），所以 cookie 按这个 authority 签发，正常；但 `/api` 的 host fence 不认这个域名，必须配 `DSH_WEB_TRUSTED_HOST`
+- 证书 90 天，`serve` 会自动续，不用管
+- 入站是 tailscaled 接的：换成 sing-box 这类**用户态** Tailscale 端点没有 `serve` 能力，模式 B 走不通，只能模式 A
 
 ## 安全
 
@@ -136,26 +142,26 @@ tailscale serve --bg --https=443 http://127.0.0.1:8443
 - 有条件给 8443 加 tailnet ACL，只放行自己的设备；
 - 日志文件含 token，别随便 `cat` 到公开的地方。
 
-## 想要 HTTPS（可选）
+## 备选：dsh 自己挂证书
 
-手机上的剪贴板 API、PWA 安装需要 secure context。两条路：
+不想用 `serve` 的话，也可以让 dsh 直接讲 TLS（绑 100.x 或 loopback 都行）：
 
-1. dsh 自带 TLS：
-   ```sh
-   tailscale cert --cert-file ~/.dsh/tls/cert.pem --key-file ~/.dsh/tls/key.pem mac-mini.<tailnet>.ts.net
-   # 然后在 bin/dsh-web 的 exec 行加 --tls-cert/--tls-key，并加 --public-url https://mac-mini.<tailnet>.ts.net:8443
-   ```
-   需要先在 Tailscale 管理台打开 HTTPS Certificates，且 MagicDNS 要开。
-2. `tailscale serve` 反代到 `127.0.0.1:8443`：可行，但 cookie 按 Host/authority 绑定，Host 必须透传，还要给 dsh 加 `--trusted-host`，不如第 1 条稳。
+```sh
+tailscale cert --cert-file ~/.dsh/tls/cert.pem --key-file ~/.dsh/tls/key.pem <machine>.<tailnet>.ts.net
+# 再给 dsh web 加 --tls-cert/--tls-key/--public-url
+```
+
+代价是证书 90 天到期后要重签并重启；`serve` 那条路会自动续期。
 
 ## 排错
 
 ```sh
 dsh-mode                       # 一眼看谁在跑
-dsh-web-url                    # 地址 + launchd 状态 + HTTP 码 + 最近日志行
+dsh-web-url                    # 地址 + launchd 状态 + HTTP 码
 bin/dsh-web --dry-run          # 看锁在谁手里、会绑哪个地址
+tailscale serve status         # HTTPS 模式：反代目标对不对
 tail -n 40 ~/Library/Logs/dsh-web.log
 lsof -nP -iTCP:8443 -sTCP:LISTEN
 ```
 
-常见原因：桌面 App 还开着（等锁超时 → 退出 0，服务不重启）；Tailscale 没登录（退出 1，每 30 秒重试）；App 被移动/改名（找不到 CLI，退出 1）。
+常见原因：桌面 App 还开着（等锁超时 → 退出 0，服务不重启）；Tailscale 没登录（退出 1，每 30 秒重试）；App 被移动/改名（找不到 CLI，退出 1）；HTTPS 模式 502（`serve` 正常但上游没起——dsh 还绑在 100.x，或根本没启动）；改了 plist 但用的是 `kickstart`（不重载配置）。

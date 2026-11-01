@@ -14,6 +14,9 @@
 #   DSH_WEB_PORT          监听端口，默认 8443
 #   DSH_WEB_WAIT_SECONDS  等会话锁释放的秒数，默认 600
 #   DSH_WEB_LOG           日志路径，默认 ~/Library/Logs/dsh-web.log
+#   DSH_WEB_HOST          强制绑定地址（反向代理模式填 127.0.0.1）
+#   DSH_WEB_PUBLIC_URL    透传给 dsh web --public-url
+#   DSH_WEB_TRUSTED_HOST  透传给 dsh web --trusted-host
 set -u
 
 DSH_BIN="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
@@ -71,21 +74,25 @@ if [ -n "$holders" ]; then
 	fi
 fi
 
-ip=$(tailscale_ip)
+# 绑定地址：默认取 Tailscale IPv4；DSH_WEB_HOST 可以强制指定（反向代理模式用 127.0.0.1）。
+ip="${DSH_WEB_HOST:-}"
 if [ -z "$ip" ]; then
-	if [ "$dry_run" = 1 ]; then
-		log "dry-run：Tailscale 没有 IPv4（未登录或接口未起）"
-		exit 1
-	fi
-	i=0
-	while [ "$i" -lt 30 ] && [ -z "$ip" ]; do
-		sleep 2
-		i=$((i + 1))
-		ip=$(tailscale_ip)
-	done
+	ip=$(tailscale_ip)
 	if [ -z "$ip" ]; then
-		log "Tailscale 没有 IPv4，稍后重试（检查 tailscale status）"
-		exit 1
+		if [ "$dry_run" = 1 ]; then
+			log "dry-run：Tailscale 没有 IPv4（未登录或接口未起）"
+			exit 1
+		fi
+		i=0
+		while [ "$i" -lt 30 ] && [ -z "$ip" ]; do
+			sleep 2
+			i=$((i + 1))
+			ip=$(tailscale_ip)
+		done
+		if [ -z "$ip" ]; then
+			log "Tailscale 没有 IPv4，稍后重试（检查 tailscale status）"
+			exit 1
+		fi
 	fi
 fi
 
@@ -94,5 +101,9 @@ if [ "$dry_run" = 1 ]; then
 	exit 0
 fi
 
+set -- web --host "$ip" --port "$PORT" --no-open
+[ -n "${DSH_WEB_PUBLIC_URL:-}" ] && set -- "$@" --public-url "$DSH_WEB_PUBLIC_URL"
+[ -n "${DSH_WEB_TRUSTED_HOST:-}" ] && set -- "$@" --trusted-host "$DSH_WEB_TRUSTED_HOST"
+
 log "启动：http://$ip:$PORT （日志 $LOG）"
-exec "$DSH_BIN" web --host "$ip" --port "$PORT" --no-open
+exec "$DSH_BIN" "$@"

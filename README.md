@@ -87,11 +87,45 @@ dsh-mode restart
 - **token 每个进程随机**：服务重启后旧地址失效（已签发的 cookie 还有效）。重跑 `dsh-web-url`。
 - **裸端口 401**：`http://ip:8443/` 不带 cookie 就是 401，这是设计，不是坏了。
 
-## 网络
+## 两种接入方式
 
-手机和 Mac 本机都用 `http://<tailscale-ip>:8443/`。
+### A. 直接绑 Tailscale IP（默认）
+
+`dsh-web` 启动时解析 `tailscale ip -4` 并 `--host <ts-ip>`。tailscaled 把 IP 挂在 utun 上，内核直接投递到 socket。
+
+- 手机 / 本机：`http://<tailscale-ip>:8443/`
+- 优点：没有额外一跳，最简单
+- 缺点：明文 HTTP（WireGuard 已加密链路），手机侧剪贴板 API / PWA 安装需要 secure context，会不可用
 
 本机浏览器如果被系统代理（`127.0.0.1:3128`）拦成 502，把 `100.64.0.0/10` 加进代理排除列表即可——不需要额外的本地监听。
+
+### B. 127.0.0.1 + `tailscale serve`（反向代理，HTTPS）
+
+```sh
+# 1) 让 dsh 只绑 loopback（或在 plist 的 EnvironmentVariables 里加 DSH_WEB_HOST=127.0.0.1）
+DSH_WEB_HOST=127.0.0.1 dsh-mode restart
+
+# 2) tailscaled 在 tailnet 的 443 上反代到本地
+tailscale serve --bg --https=443 http://127.0.0.1:8443
+
+# 3) 手机开
+#    https://<machine>.<tailnet>.ts.net/
+```
+
+要点：
+
+- cookie 按 Host（authority）签发，`serve` 必须**原样透传 Host**；一旦被改写成 `127.0.0.1:8443`，浏览器拿不到 cookie，就是 401 循环
+- 要把对外地址告诉 dsh，否则打印和 `DSH_WEB_URL` 里还是 loopback：
+
+  ```sh
+  DSH_WEB_PUBLIC_URL=https://<machine>.<tailnet>.ts.net \
+  DSH_WEB_TRUSTED_HOST=<machine>.<tailnet>.ts.net \
+  DSH_WEB_HOST=127.0.0.1 dsh-mode restart
+  ```
+
+  这两个变量由 `dsh-web` 透传给 `dsh web --public-url/--trusted-host`
+- 需要先在 Tailscale 管理台打开 HTTPS Certificates（MagicDNS 也要开），`serve` 才能签证书
+- 这条路的入站由 tailscaled 接：换成 sing-box 这类**用户态** Tailscale 端点就没有 `serve` 能力，模式 B 走不通
 
 ## 安全
 

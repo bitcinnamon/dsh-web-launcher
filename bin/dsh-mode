@@ -125,13 +125,15 @@ cmd_restart() {
 	if app_running; then
 		die "桌面版在跑，先跑 dsh-mode web 切过来"
 	fi
+	# bootout + bootstrap（而不是 kickstart），这样 plist 里改过的环境变量才会重新读取。
 	if svc_loaded; then
-		say "重启 Web 服务…"
-		/bin/launchctl kickstart -k "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || die "kickstart 失败"
+		say "重载并重启 Web 服务…"
+		/bin/launchctl bootout "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || true
+		wait_until 10 no_port || true
 	else
 		say "服务没在跑，直接启动…"
-		/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || die "bootstrap 失败：$PLIST"
 	fi
+	/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || die "bootstrap 失败：$PLIST"
 	if ! wait_until 90 has_port; then
 		say "服务没起来，日志最后几行：" >&2
 		/usr/bin/tail -n 15 "$LOG" >&2 2>/dev/null

@@ -7,7 +7,8 @@ AGENTS="$HOME/Library/LaunchAgents"
 PLIST="$AGENTS/$LABEL.plist"
 
 /bin/launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-rm -f "$PLIST" "$HOME/.local/bin/dsh-web" "$HOME/.local/bin/dsh-web-url" "$HOME/.local/bin/dsh-mode"
+rm -f "$PLIST" "$HOME/.local/bin/dsh-web" "$HOME/.local/bin/dsh-web-url" "$HOME/.local/bin/dsh-mode" \
+	"$HOME/.local/bin/dsh-web-samesite-lax.cjs"
 
 echo "已卸载服务。"
 echo "日志仍在：$HOME/Library/Logs/dsh-web.log（含 token，可 rm）"

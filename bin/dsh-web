@@ -5,6 +5,8 @@
 #   1. 有别的 host（通常是桌面 App）正占着会话写锁时，最多等 10 分钟让它退出；
 #   2. 解析本机 Tailscale IPv4（等接口就绪，最多 60 秒）；
 #   3. exec 掉 App 自带的同版本 CLI：dsh web --host <ts-ip> --port <port> --no-open
+#      并先挂上 dsh-web-samesite-lax.cjs（会话 cookie 从 Strict 改 Lax，
+#      否则安卓装成 WebAPK 后冷启动会 401：上游 issue #5362）。
 #
 # 用法：
 #   dsh-web            正常启动（launchd 也是走这条）
@@ -105,5 +107,26 @@ set -- web --host "$ip" --port "$PORT" --no-open
 [ -n "${DSH_WEB_PUBLIC_URL:-}" ] && set -- "$@" --public-url "$DSH_WEB_PUBLIC_URL"
 [ -n "${DSH_WEB_TRUSTED_HOST:-}" ] && set -- "$@" --trusted-host "$DSH_WEB_TRUSTED_HOST"
 
+# 安卓「装到桌面」的 WebAPK 冷启动是 cross-site 顶层导航，SameSite=Strict 的会话 cookie
+# 会被浏览器扣下 → 401。这里挂一个运行时补丁把它改成 Lax（见 bin/dsh-web-samesite-lax.cjs）。
+# Electron 以 node 方式跑 CLI 时忽略 NODE_OPTIONS，所以只好直接调二进制 + --require。
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || self_dir=""
+SESSION_PATCH=""
+for candidate in "${self_dir:-}/dsh-web-samesite-lax.cjs" "$HOME/.local/bin/dsh-web-samesite-lax.cjs"; do
+	if [ -r "$candidate" ]; then
+		SESSION_PATCH=$candidate
+		break
+	fi
+done
+ELECTRON_BIN="/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness"
+CLI_JS="/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js"
+# cli.js 在 app.asar 里，shell 的 test -f 看不见（asar 是单个文件），只能检查 asar 本体。
+ASAR="/Applications/DeepSeek Harness.app/Contents/Resources/app.asar"
+
 log "启动：http://$ip:$PORT （日志 $LOG）"
+if [ -n "$SESSION_PATCH" ] && [ -x "$ELECTRON_BIN" ] && [ -f "$ASAR" ]; then
+	log "会话 cookie 补丁：$SESSION_PATCH（SameSite=Lax，修安卓 WebAPK 冷启动 401）"
+	ELECTRON_RUN_AS_NODE=1 exec "$ELECTRON_BIN" --require "$SESSION_PATCH" --expose-internals "$CLI_JS" "$@"
+fi
+log "会话 cookie 补丁未启用（找不到补丁/二进制/CLI），按原样启动"
 exec "$DSH_BIN" "$@"

@@ -37,8 +37,22 @@ mkdir -p "$BIN_DIR" "$AGENTS" "$LOG_DIR"
 install -m 755 "$HERE/bin/dsh-web" "$BIN_DIR/dsh-web"
 install -m 755 "$HERE/bin/dsh-web-url" "$BIN_DIR/dsh-web-url"
 install -m 755 "$HERE/bin/dsh-mode" "$BIN_DIR/dsh-mode"
+install -m 644 "$HERE/bin/dsh-web-samesite-lax.cjs" "$BIN_DIR/dsh-web-samesite-lax.cjs"
+
+# 反向代理模式的三件套（DSH_WEB_HOST / PUBLIC_URL / TRUSTED_HOST）：
+# 环境变量优先，其次沿用已安装 plist 里的值，都没有就留空（空值等于原来的直连模式）。
+plist_value() {
+	[ -f "$PLIST" ] || return 0
+	/usr/bin/plutil -extract "EnvironmentVariables.$1" raw -o - "$PLIST" 2>/dev/null || true
+}
+WEB_HOST="${DSH_WEB_HOST:-$(plist_value DSH_WEB_HOST)}"
+PUBLIC_URL="${DSH_WEB_PUBLIC_URL:-$(plist_value DSH_WEB_PUBLIC_URL)}"
+TRUSTED_HOST="${DSH_WEB_TRUSTED_HOST:-$(plist_value DSH_WEB_TRUSTED_HOST)}"
 
 /usr/bin/sed -e "s|__HOME__|$HOME|g" -e "s|__PORT__|$PORT|g" \
+	-e "s|__WEB_HOST__|$WEB_HOST|g" \
+	-e "s|__PUBLIC_URL__|$PUBLIC_URL|g" \
+	-e "s|__TRUSTED_HOST__|$TRUSTED_HOST|g" \
 	"$HERE/com.deepseek.dsh-web.plist.in" > "$PLIST.tmp"
 /usr/bin/plutil -lint "$PLIST.tmp" >/dev/null || { echo "生成的 plist 不合法" >&2; rm -f "$PLIST.tmp"; exit 1; }
 mv "$PLIST.tmp" "$PLIST"
@@ -48,6 +62,7 @@ echo "已安装："
 echo "  $BIN_DIR/dsh-web"
 echo "  $BIN_DIR/dsh-web-url"
 echo "  $BIN_DIR/dsh-mode"
+echo "  $BIN_DIR/dsh-web-samesite-lax.cjs"
 echo "  $PLIST"
 echo
 

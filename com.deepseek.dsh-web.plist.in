@@ -25,6 +25,12 @@
 		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>DSH_WEB_PORT</key>
 		<string>__PORT__</string>
+		<key>DSH_WEB_HOST</key>
+		<string>__WEB_HOST__</string>
+		<key>DSH_WEB_PUBLIC_URL</key>
+		<string>__PUBLIC_URL__</string>
+		<key>DSH_WEB_TRUSTED_HOST</key>
+		<string>__TRUSTED_HOST__</string>
 	</dict>
 	<key>StandardOutPath</key>
 	<string>__HOME__/Library/Logs/dsh-web.log</string>

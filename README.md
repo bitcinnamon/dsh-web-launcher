@@ -5,7 +5,8 @@
 用 App 自带的 CLI（当前 `0.2.1-rc.5`，和桌面端同版本），不需要装 Node。
 
 ```
-bin/dsh-web          包装脚本：等会话锁 → 解析 Tailscale IP → exec dsh web
+bin/dsh-web          包装脚本：等会话锁 → 解析 Tailscale IP → exec dsh web（并挂上 cookie 补丁）
+bin/dsh-web-samesite-lax.cjs   运行时补丁：会话 cookie 改 SameSite=Lax，安卓装成 App 也能冷启动
 bin/dsh-web-url      打印带 token 的访问地址 + 服务状态
 bin/dsh-mode         一键切换 / 重启：dsh-mode app | web | restart | url
 install.sh           装到 ~/.local/bin 和 ~/Library/LaunchAgents
@@ -33,6 +34,8 @@ dsh-mode url       # 只要地址
 2. `dsh-mode restart`
 3. `dsh -V` 或 `dsh-mode status` 确认版本。
 
+升级后 `dsh-mode restart` 会重新挂上 `dsh-web-samesite-lax.cjs`（补丁在 launcher 侧，不在 App 里）。万一哪天 CLI 的内部路径变了，日志里会出现「会话 cookie 补丁未启用」，这时 dsh-web 会退回原始 CLI wrapper 照常启动，只是安卓装成 App 又会 401——按下面那节重新对一下路径即可。
+
 升级前备份一下 `~/.dsh`（会话格式会迁移，不可逆）：
 
 ```sh
@@ -58,6 +61,26 @@ tar -czf ~/dsh-backup-$(date +%F).tgz -C ~ .dsh/sessions .dsh/storages .dsh/prof
 ```
 
 验证新签发的 cookie：带 token 请求一次，看 `Set-Cookie` 里 `Max-Age=31536000`。
+
+## 安卓「安装 Web 应用」后打不开（401 / 需要 token）
+
+症状：手机 Chrome 提示安装应用，装好后从桌面图标打开 → `dsh web authentication required; reopen the URL printed by dsh web.`；同一个地址在 Chrome 标签页里却正常。
+
+原因：`?token=` 只用于第一次交换，之后靠签名 cookie。安卓 WebAPK 冷启动的那次根导航被 Chrome 标成 `sec-fetch-site: cross-site`，`SameSite=Strict` 的 cookie 因此被浏览器扣下 → 401。桌面端从聊天/邮件里点链接进来也一样。上游已知问题：`deepseek-ai/deepseek-harness#5362`，`0.2.1-rc.5` 仍未修。
+
+本仓库的处理：`bin/dsh-web-samesite-lax.cjs`，用 `--require` 挂进 dsh 进程（Electron 以 node 方式跑 CLI 时会忽略 `NODE_OPTIONS`，所以只能直接调二进制）。它只改一件事：把签发的 `dsh-auth-*` cookie 从 `SameSite=Strict` 换成 `Lax`，其它 cookie 一律不动。Lax 在跨站顶层 GET 导航上会发送，冷启动就能拿到首页；首页之后的 `/api`、WebSocket 都是同源请求，不受影响。
+
+生效：
+
+```sh
+sh install.sh
+dsh-mode restart     # 日志里应出现「会话 cookie 补丁：…」
+dsh-web-url          # 拿新地址
+```
+
+**必须再用这个新地址在手机 Chrome 里打开一次**：cookie 的属性是签发时定死的，浏览器里已有的 Strict cookie 不会自己变。看到地址栏的 `?token=…` 消失（303 到 `./`）就说明换好了，之后桌面图标冷启动不再 401。
+
+代价：`Lax` 意味着跨站顶层 GET 导航也会带 cookie（以前不带），换来的是从聊天/邮件点链接进来也不再 401。想回退：删掉 `~/.local/bin/dsh-web-samesite-lax.cjs` 再 `dsh-mode restart`（已签发的 cookie 不会变回去，重新换一次 token 即可）。
 
 ## 安装
 
@@ -87,6 +110,7 @@ dsh-mode restart
 - **office 技能只有桌面端有**：它由 Electron 进程注入，不是 profile 配置，web 端拿不到。
 - **token 每个进程随机**：服务重启后旧地址失效（已签发的 cookie 还有效）。重跑 `dsh-web-url`。
 - **裸端口 401**：`http://ip:8443/` 不带 cookie 就是 401，这是设计，不是坏了。
+- **安卓装成 App 冷启动 401**：上游 cookie 是 `SameSite=Strict`，WebAPK 冷启动那次导航被判成跨站，cookie 被浏览器扣下。本仓库用 `dsh-web-samesite-lax.cjs` 换成 Lax，见下文「安卓『安装 Web 应用』后打不开」。
 
 ## 两种接入方式
 
@@ -126,6 +150,8 @@ dsh-mode restart
 
 `dsh-mode restart` 走的是 bootout + bootstrap，会重新读 plist；`launchctl kickstart` **不会**，改了 plist 必须用前者。
 
+`install.sh` 生成 plist 时，`DSH_WEB_HOST` / `DSH_WEB_PUBLIC_URL` / `DSH_WEB_TRUSTED_HOST` 的值来源顺序是：环境变量 → 已安装 plist 里的旧值 → 空（空即直连模式）。所以重复跑 `sh install.sh` 不会把反向代理配置冲掉；要改就带环境变量跑一次。
+
 **踩过的坑**：
 
 - `serve` 的上游**必须是 127.0.0.1**。指到 `100.x` 会挂住：TLS 握手能完成，但请求永远等不到响应（tailscaled 自己 hairpin 自己的 tailnet IP）
@@ -162,6 +188,10 @@ bin/dsh-web --dry-run          # 看锁在谁手里、会绑哪个地址
 tailscale serve status         # HTTPS 模式：反代目标对不对
 tail -n 40 ~/Library/Logs/dsh-web.log
 lsof -nP -iTCP:8443 -sTCP:LISTEN
+curl -H "Host: <machine>.<tailnet>.ts.net" -o /dev/null -w '%{http_code}\n' \
+  "http://127.0.0.1:8443/?token=$(dsh-web-url | head -1 | sed 's/.*token=//')"
 ```
 
 常见原因：桌面 App 还开着（等锁超时 → 退出 0，服务不重启）；Tailscale 没登录（退出 1，每 30 秒重试）；App 被移动/改名（找不到 CLI，退出 1）；HTTPS 模式 502（`serve` 正常但上游没起——dsh 还绑在 100.x，或根本没启动）；改了 plist 但用的是 `kickstart`（不重载配置）。
+
+`dsh-web-url` 报 `HTTP=000` 但 `launchd=running`：本机 DNS 把 `*.ts.net` 解析到了代理的 fake-IP（`198.18.x.x`），本机 curl 走不到 `tailscale serve`，但手机侧是通的。脚本现在会自动退回 `127.0.0.1:8443` + `Host` 头再探一次，输出里会注明。

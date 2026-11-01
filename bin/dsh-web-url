@@ -1,5 +1,5 @@
 #!/bin/sh
-# dsh-web-url — 打印当前 Web host 的带 token 地址（打开一次即可换 30 天 cookie）。
+# dsh-web-url — 打印当前 Web host 的带 token 地址（打开一次即可换 cookie，本机 365 天有效）。
 #
 # token 每个进程随机生成，存在日志里；host 重启后旧地址失效，重跑本命令即可。
 set -u
@@ -26,10 +26,24 @@ state=$(/bin/launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | /usr/bin/awk '/
 # 带 token 的首页会 303 换 cookie；401 说明 token 属于上一个进程（已重启）。
 code=$(/usr/bin/curl -s -o /dev/null -m 3 -w '%{http_code}' "$url" 2>/dev/null)
 
+# 本机 curl 用的是系统 DNS：*.ts.net 被代理劫持（198.18.x.x 之类的 fake-IP）时，
+# 公网地址在本机探不通，但 Tailscale 那边其实是好的。这时退回 loopback + Host 头再探一次。
+via=""
+if [ -z "${code:-}" ] || [ "${code}" = "000" ]; then
+	hostport=$(printf '%s' "$url" | /usr/bin/sed -E 's#^[a-zA-Z]+://([^/]+).*#\1#')
+	token=$(printf '%s' "$url" | /usr/bin/sed -E 's/.*[?&]token=([A-Za-z0-9_-]+).*/\1/')
+	loop=$(/usr/bin/curl -s -o /dev/null -m 3 -w '%{http_code}' \
+		-H "Host: $hostport" "http://127.0.0.1:${DSH_WEB_PORT:-8443}/?token=$token" 2>/dev/null)
+	if [ -n "${loop:-}" ] && [ "${loop}" != "000" ]; then
+		code=$loop
+		via="（本机 DNS 被代理劫持，HTTP 这一项改走 loopback + Host 头探测）"
+	fi
+fi
+
 printf '%s\n' "$url"
-printf '状态：launchd=%s  HTTP=%s' "$state" "${code:-无响应}"
+printf '状态：launchd=%s  HTTP=%s%s' "$state" "${code:-无响应}" "$via"
 case "${code:-}" in
-	303) printf ' （正常：打开一次换 30 天 cookie）\n' ;;
+	303) printf ' （正常：打开一次换 cookie；装好的 App 冷启动也能进）\n' ;;
 	401) printf ' （token 已失效：服务重启过，重跑本命令）\n' ;;
 	000|'') printf ' （连不上：服务没起，看 tail -n 40 %s）\n' "$LOG" ;;
 	*) printf '\n' ;;

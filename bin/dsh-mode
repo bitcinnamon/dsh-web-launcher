@@ -57,6 +57,7 @@ dsh-mode — 在「桌面版」和「手机用的 Web 版」之间切换。
   dsh-mode          看当前谁在跑（默认）
   dsh-mode app      停 Web 服务，打开桌面版
   dsh-mode web      退出桌面版，起 Web 服务，打印手机地址
+  dsh-mode restart  重启 Web 服务（升级 App 后用这个）
   dsh-mode url      只打印手机地址
 
 两者不能同时持有会话写锁，所以每次切换都要先把对面停干净。
@@ -120,6 +121,26 @@ cmd_web() {
 	say "  $(last_url)"
 }
 
+cmd_restart() {
+	if app_running; then
+		die "桌面版在跑，先跑 dsh-mode web 切过来"
+	fi
+	if svc_loaded; then
+		say "重启 Web 服务…"
+		/bin/launchctl kickstart -k "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || die "kickstart 失败"
+	else
+		say "服务没在跑，直接启动…"
+		/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || die "bootstrap 失败：$PLIST"
+	fi
+	if ! wait_until 90 has_port; then
+		say "服务没起来，日志最后几行：" >&2
+		/usr/bin/tail -n 15 "$LOG" >&2 2>/dev/null
+		exit 1
+	fi
+	say "已重启。"
+	cmd_url
+}
+
 cmd_url() {
 	if command -v dsh-web-url >/dev/null 2>&1; then
 		exec dsh-web-url
@@ -132,6 +153,7 @@ cmd_url() {
 case "${1:-status}" in
 	app | desktop) cmd_app ;;
 	web | phone) cmd_web ;;
+	restart | reload) cmd_restart ;;
 	status) cmd_status ;;
 	url) cmd_url ;;
 	-h | --help | help) usage ;;

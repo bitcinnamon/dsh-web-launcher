@@ -183,6 +183,13 @@ tailscale cert --cert-file ~/.dsh/tls/cert.pem --key-file ~/.dsh/tls/key.pem <ma
 
 代价是证书 90 天到期后要重签并重启；`serve` 那条路会自动续期。
 
+## launchd 小抄（这几种坑都踩过）
+
+- `KeepAlive{SuccessfulExit: false}` 的意思是「**非 0 退出**才拉起」。脚本里 `exit 0` 会被当成正常收工，服务从此再也不启动——`dsh-web` 等锁超时曾经就是 `exit 0`，桌面 App 占锁超过 10 分钟再退出就再也起不来，已改成 `exit 1`（[#1](https://github.com/bitcinnamon/dsh-web-launcher/pull/1)）。
+- `launchctl kickstart` **不重读 plist**，只是让旧配置再跑一遍。改了 `DSH_WEB_*` 必须 `bootout` + `bootstrap`；`dsh-mode web` 和 `restart` 现在都走这条。
+- 排查先看 `launchctl print gui/$(id -u)/com.deepseek.dsh-web`：`last exit code = (never exited)` 比 `ps` 更能说明「这个进程从加载起就没退过」。
+- 服务卡在等锁时，日志里只有一行「会话被 PID … 占着」。这时 `dsh-mode status` 会同时显示桌面版在跑——用 `dsh-mode web` 切，别急着 kickstart。
+
 ## 排错
 
 ```sh

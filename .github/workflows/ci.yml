@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck -x -S warning bin/dsh-web bin/dsh-mode bin/dsh-web-url install.sh uninstall.sh
+
+      - name: node --check（cookie 补丁）
+        run: node --check bin/dsh-web-samesite-lax.cjs
+
+      - name: plist 模板结构校验
+        run: python3 -c "import plistlib; d=plistlib.load(open('com.deepseek.dsh-web.plist.in','rb')); assert d['Label']=='com.deepseek.dsh-web'; assert d['ProgramArguments']==['__HOME__/.local/bin/dsh-web']; print('plist OK:', sorted(d['EnvironmentVariables']))"

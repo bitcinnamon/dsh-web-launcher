@@ -10,6 +10,8 @@ bin/dsh-web-samesite-lax.cjs   运行时补丁：会话 cookie 改 SameSite=Lax�
 bin/dsh-web-url      打印带 token 的访问地址 + 服务状态
 bin/dsh-mode         一键切换 / 重启：dsh-mode app | web | restart | url
 install.sh           装到 ~/.local/bin 和 ~/Library/LaunchAgents
+LICENSE              MIT
+.github/workflows/ci.yml  shellcheck + node --check + plist 结构校验
 uninstall.sh         卸载
 com.deepseek.dsh-web.plist.in   launchd 模板
 ```
@@ -25,6 +27,7 @@ dsh-mode url       # 只要地址
 ```
 
 `dsh-mode web` 会自己等 App 退出、等会话锁释放、确认端口起来再打印 URL；`dsh-mode app` 会先 bootout 服务再 `open`。
+`web` 和 `restart` 走同一条 `bootout + bootstrap`，都会**重读 plist**——改了 `DSH_WEB_*` 环境变量后不用再额外 restart 一次。
 
 **不用记 `launchctl kickstart`**，一律用 `dsh-mode restart`。它失败时会打日志尾，不会静默。
 
@@ -97,7 +100,7 @@ dsh-mode restart
 
 ## 它做了什么
 
-1. **等锁**：`~/.dsh/sessions/*/*/session.lock` 被别的进程打开着（桌面 App 常驻时会这样），就每 5 秒看一次，最多等 10 分钟（`DSH_WEB_WAIT_SECONDS`）。
+1. **等锁**：`~/.dsh/sessions/*/*/session.lock` 被别的进程打开着（桌面 App 常驻时会这样），就每 5 秒看一次，最多等 10 分钟（`DSH_WEB_WAIT_SECONDS`）；超时后**`exit 1`**，交给 launchd 按 `ThrottleInterval`（30 秒）重试，所以 App 退出后服务会自己起来。`exit 0` 会被 launchd 当成正常收工，永远不再拉起——不要改回去。
 2. **解析绑定地址**：`DSH_WEB_HOST` 优先；没设就 `tailscale ip -4`（接口没起来等 60 秒）。
 3. **启动**：`dsh web --host <addr> --port 8443 --no-open`，`DSH_WEB_PUBLIC_URL` / `DSH_WEB_TRUSTED_HOST` 会透传成 `--public-url` / `--trusted-host`。
 
@@ -105,6 +108,7 @@ dsh-mode restart
 
 ## 必须知道的限制
 
+- **切模式后已签发的 cookie 全部失效**：cookie 的签名绑定监听器的 scheme——模式 A 是 `http:`，模式 B（`tailscale serve`）是 `https:`，两者不通用。A↔B 切换后用 `dsh-web-url` 的地址重新打开一次即可。
 - **和桌面 App 互斥**：同一个会话同一时刻只能有一个 host 持有写锁（内核 flock）。桌面 App 开着时，这个服务会等它退出；反过来服务在跑时，桌面 App 打开会话会报 `SessionAlreadyOwned`。要二选一。
 - **web profile 是独立的一套插件配置**：首次启动会在 `~/.dsh/profiles/web` 初始化。默认模型、MCP（kimi-cu）要单独配——否则同一个会话在手机上会提示「N 个工具被删除」。会话、工作区、账号凭据是共享的。
 - **office 技能只有桌面端有**：它由 Electron 进程注入，不是 profile 配置，web 端拿不到。
@@ -192,6 +196,6 @@ curl -H "Host: <machine>.<tailnet>.ts.net" -o /dev/null -w '%{http_code}\n' \
   "http://127.0.0.1:8443/?token=$(dsh-web-url | head -1 | sed 's/.*token=//')"
 ```
 
-常见原因：桌面 App 还开着（等锁超时 → 退出 0，服务不重启）；Tailscale 没登录（退出 1，每 30 秒重试）；App 被移动/改名（找不到 CLI，退出 1）；HTTPS 模式 502（`serve` 正常但上游没起——dsh 还绑在 100.x，或根本没启动）；改了 plist 但用的是 `kickstart`（不重载配置）。
+常见原因：桌面 App 还开着（等锁超时 → 退出 1，30 秒后自动重试，不用手动 kickstart）；Tailscale 没登录（退出 1，每 30 秒重试）；App 被移动/改名（找不到 CLI，退出 1）；HTTPS 模式 502（`serve` 正常但上游没起——dsh 还绑在 100.x，或根本没启动）；改了 plist 但用的是 `kickstart`（不重载配置）。
 
 `dsh-web-url` 报 `HTTP=000` 但 `launchd=running`：本机 DNS 把 `*.ts.net` 解析到了代理的 fake-IP（`198.18.x.x`），本机 curl 走不到 `tailscale serve`，但手机侧是通的。脚本现在会自动退回 `127.0.0.1:8443` + `Host` 头再探一次，输出里会注明。

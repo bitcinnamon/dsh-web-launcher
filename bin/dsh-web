@@ -3,6 +3,8 @@
 #
 # 行为：
 #   1. 有别的 host（通常是桌面 App）正占着会话写锁时，最多等 10 分钟让它退出；
+#      超时则 exit 1（不是 0）：plist 是 KeepAlive{SuccessfulExit=false}，
+#      退出 0 会让 launchd 当成正常收工、再也不拉起；
 #   2. 解析本机 Tailscale IPv4（等接口就绪，最多 60 秒）；
 #   3. exec 掉 App 自带的同版本 CLI：dsh web --host <ts-ip> --port <port> --no-open
 #      并先挂上 dsh-web-samesite-lax.cjs（会话 cookie 从 Strict 改 Lax，
@@ -25,7 +27,6 @@ DSH_BIN="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/d
 PORT="${DSH_WEB_PORT:-8443}"
 WAIT_LOCK_SECONDS="${DSH_WEB_WAIT_SECONDS:-600}"
 LOG="${DSH_WEB_LOG:-$HOME/Library/Logs/dsh-web.log}"
-LABEL="com.deepseek.dsh-web"
 
 log() { printf '%s [dsh-web] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
 
@@ -66,8 +67,11 @@ if [ -n "$holders" ]; then
 		deadline=$(( $(date +%s) + WAIT_LOCK_SECONDS ))
 		while [ -n "$holders" ]; do
 			if [ "$(date +%s)" -ge "$deadline" ]; then
-				log "等待超时，先不启动。退出 App 后执行：launchctl kickstart -k gui/$(id -u)/$LABEL"
-				exit 0
+				# 必须以非 0 退出：plist 里是 KeepAlive{SuccessfulExit=false}，
+				# 退出 0 会让 launchd 认为任务正常收工、再也不拉起。
+				# 退出 1 交给 launchd 按 ThrottleInterval（30s）重试，等 App 退出后自动起来。
+				log "等待超时，退出 1 交给 launchd 稍后重试（ThrottleInterval 30s）；想立刻起：先退出桌面 App，再 dsh-mode web"
+				exit 1
 			fi
 			sleep 5
 			holders=$(lock_holders)
@@ -110,7 +114,7 @@ set -- web --host "$ip" --port "$PORT" --no-open
 # 安卓「装到桌面」的 WebAPK 冷启动是 cross-site 顶层导航，SameSite=Strict 的会话 cookie
 # 会被浏览器扣下 → 401。这里挂一个运行时补丁把它改成 Lax（见 bin/dsh-web-samesite-lax.cjs）。
 # Electron 以 node 方式跑 CLI 时忽略 NODE_OPTIONS，所以只好直接调二进制 + --require。
-self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || self_dir=""
+self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || self_dir=""
 SESSION_PATCH=""
 for candidate in "${self_dir:-}/dsh-web-samesite-lax.cjs" "$HOME/.local/bin/dsh-web-samesite-lax.cjs"; do
 	if [ -r "$candidate" ]; then

@@ -50,6 +50,20 @@ has_port() { [ -n "$(port_pid)" ]; }
 no_port() { [ -z "$(port_pid)" ]; }
 no_locks() { [ -z "$(lock_holders)" ]; }
 
+# 重载服务：bootout + bootstrap，而不是 kickstart。
+# kickstart 只是让旧配置再跑一遍；plist 里改过的环境变量、路径要重新读，
+# 只有 bootstrap 会做。web / restart 都走这条，避免两边行为不一致。
+reload_service() {
+	if svc_loaded; then
+		say "重载服务（bootout + bootstrap，会重读 plist）…"
+		/bin/launchctl bootout "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || true
+		wait_until 10 no_port || true
+	else
+		say "服务没在跑，直接启动…"
+	fi
+	/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || die "bootstrap 失败：$PLIST"
+}
+
 usage() {
 	/bin/cat <<'EOF'
 dsh-mode — 在「桌面版」和「手机用的 Web 版」之间切换。
@@ -107,11 +121,8 @@ cmd_web() {
 		say "等会话锁释放（PID $(lock_holders)）…"
 		wait_until 30 no_locks || die "会话锁还被 pid $(lock_holders) 占着，稍后再试"
 	fi
-	if svc_loaded; then
-		/bin/launchctl kickstart -k "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || die "kickstart 失败"
-	else
-		/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || die "bootstrap 失败：$PLIST"
-	fi
+	[ -f "$PLIST" ] || die "找不到 $PLIST，先跑 sh install.sh"
+	reload_service
 	if ! wait_until 90 has_port; then
 		say "服务没起来，日志最后几行：" >&2
 		/usr/bin/tail -n 15 "$LOG" >&2 2>/dev/null
@@ -126,14 +137,8 @@ cmd_restart() {
 		die "桌面版在跑，先跑 dsh-mode web 切过来"
 	fi
 	# bootout + bootstrap（而不是 kickstart），这样 plist 里改过的环境变量才会重新读取。
-	if svc_loaded; then
-		say "重载并重启 Web 服务…"
-		/bin/launchctl bootout "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || true
-		wait_until 10 no_port || true
-	else
-		say "服务没在跑，直接启动…"
-	fi
-	/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || die "bootstrap 失败：$PLIST"
+	[ -f "$PLIST" ] || die "找不到 $PLIST，先跑 sh install.sh"
+	reload_service
 	if ! wait_until 90 has_port; then
 		say "服务没起来，日志最后几行：" >&2
 		/usr/bin/tail -n 15 "$LOG" >&2 2>/dev/null

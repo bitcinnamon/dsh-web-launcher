@@ -1,7 +1,7 @@
 #!/bin/sh
 # install.sh — 把 dsh-web 装成用户级 LaunchAgent。
 #
-#   sh install.sh            只安装文件，不启动（推荐先退桌面 App 再手动 kickstart）
+#   sh install.sh            只安装文件，不启动（装完用 dsh-mode web 切过来）
 #   sh install.sh --start    安装并立即 bootstrap（会等桌面 App 释放会话锁）
 set -eu
 
@@ -72,8 +72,7 @@ if [ "$start" = 1 ]; then
 	echo "已 bootstrap；如果桌面 App 还开着，它会等在后台，等 App 退出后自动起来。"
 else
 	echo "未启动。退出桌面 App 后执行："
-	echo "  launchctl bootstrap gui/$(id -u) \"$PLIST\""
-	echo "  launchctl kickstart -k gui/$(id -u)/$LABEL   # 已加载时用它重启"
+	echo "  dsh-mode web        # 会等 App 退出、重载服务并打印访问地址"
 fi
 
 echo
